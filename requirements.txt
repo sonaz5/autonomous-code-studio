@@ -1,0 +1,10 @@
+google-genai
+langgraph
+langchain-google-genai
+deepeval
+rank_bm25
+sentence-transformers
+mcp<2.0.0
+langgraph-checkpoint-sqlite
+aiosqlite
+streamlit

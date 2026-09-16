@@ -1,0 +1,24 @@
+﻿Set-Content -Path .gitignore -Value @"
+.env
+.env.*
+*.example
+env.example
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+.deepeval/
+evaluation_logs.json
+*.log
+*.db
+*.sqlite
+*.sqlite3
+agent_memory.db
+agent_memory.db-journal
+*.zip
+.vscode/
+.DS_Store
+Thumbs.db
+"@ -Encoding UTF8
