@@ -12,3 +12,4 @@ langgraph-checkpoint-sqlite
 aiosqlite
 streamlit
 numpy
+pyarrow<17.0.0
