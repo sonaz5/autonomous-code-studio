@@ -108,24 +108,40 @@ with st.sidebar:
     
     st.markdown("---")
     st.markdown("### Specialized Audit Modules")
-    enable_owasp = st.checkbox("OWASP Security & Vulnerability Gate", value=True)
-    enable_pep8 = st.checkbox("PEP 8 & Type Hint Integrity Gate", value=True)
-    
-    st.markdown("---")
-    st.markdown("### Code Snippet Templates")
-    
-    preset_choice = st.selectbox(
-        "Select benchmark case:",
-        [
-            "Custom Code",
-            "SQL Injection & Insecure Secret (OWASP)",
-            "Unsafe HTTP Client",
-            "Unclosed Resource (I/O)",
-            "Unbounded Recursion"
-        ]
+    enable_owasp = st.checkbox(
+        "OWASP Security & Vulnerability Gate",
+        value=True,
+        help="Adds an explicit instruction asking the agent to check for SQL injection, hardcoded secrets, and other OWASP Top 10 issues."
+    )
+    enable_pep8 = st.checkbox(
+        "PEP 8 & Type Hint Integrity Gate",
+        value=True,
+        help="Adds an explicit instruction asking the agent to enforce PEP 8 naming, type hints, and docstrings in its review."
     )
     
+    st.markdown("---")
+    st.markdown("### Codebase Context (optional)")
+    context_uploads = st.file_uploader(
+        "Additional .py files for the agent to search",
+        type=["py"],
+        accept_multiple_files=True,
+        help=(
+            "The agent has a search_codebase tool that can look up helper "
+            "functions and classes while it reviews your snippet. By default "
+            "it only sees the snippet itself; upload related files here (e.g. "
+            "a utils.py the snippet imports from) so it can search those too."
+        ),
+    )
+
+    st.markdown("---")
+    st.markdown("### Code Snippet Templates")
+
+    # NOTE: "Custom Code" is included as a real key (mapped to an empty
+    # string) so the selectbox options and the code lookup dict share a
+    # single source of truth -- this also makes the reset-to-empty case
+    # ("Custom Code") behave exactly like every other preset.
     sample_codes = {
+        "Custom Code": "",
         "SQL Injection & Insecure Secret (OWASP)": (
             "import sqlite3\n\n"
             "SECRET_TOKEN = 'sk-live-9948271827419'\n\n"
@@ -158,14 +174,80 @@ with st.sidebar:
         )
     }
 
+    # One-line explanation of what each benchmark case is meant to expose,
+    # shown under the selectbox so the case is self-explanatory before the
+    # agent even runs.
+    benchmark_descriptions = {
+        "Custom Code": "Paste your own snippet in the panel on the left.",
+        "SQL Injection & Insecure Secret (OWASP)": (
+            "User input is concatenated straight into a SQL string, and an API "
+            "token is hardcoded in the source -- two classic OWASP findings."
+        ),
+        "Unsafe HTTP Client": (
+            "The outbound request has no timeout and no exception handling, so "
+            "a slow or failing upstream API can hang or crash the caller."
+        ),
+        "Unclosed Resource (I/O)": (
+            "The file is opened without a `with` block and never closed, "
+            "leaking a file handle on every call."
+        ),
+        "Unbounded Recursion": (
+            "Naive recursive Fibonacci with no memoization: exponential time "
+            "complexity and no base-case guard against deep recursion."
+        ),
+    }
+
+    def _load_benchmark_case() -> None:
+        """on_change callback for the selectbox below.
+
+        Streamlit widgets that are given a `key` are stateful: once
+        `st.session_state[key]` exists, the widget's `value=` argument is
+        only used for the very first render and is silently ignored on every
+        rerun after that. The text_area below has key="review_code_input",
+        so simply changing `preset_choice` and passing a new `value=` (the
+        old approach) never actually updated the box after the first
+        selection -- this callback fixes that by writing the chosen
+        preset's code directly into the text_area's session_state entry.
+        """
+        choice = st.session_state.get("preset_choice_select", "Custom Code")
+        st.session_state["review_code_input"] = sample_codes.get(choice, "")
+
+    preset_choice = st.selectbox(
+        "Select benchmark case:",
+        list(sample_codes.keys()),
+        key="preset_choice_select",
+        on_change=_load_benchmark_case,
+        help="Loads a ready-made vulnerable snippet into the code box on the right so you can try the reviewer without writing your own code first."
+    )
+
+    if preset_choice != "Custom Code":
+        st.caption(f"ℹ️ {benchmark_descriptions.get(preset_choice, '')}")
+
 # 4. Main Clean Header
 st.markdown('<div class="main-title">Autonomous Code Analysis Studio</div>', unsafe_allow_html=True)
 st.markdown(
     '<div class="sub-title">'
-    'Orchestrated with LangGraph | Model Context Protocol (MCP) | Gemini 3.1 Flash Lite'
+    'Orchestrated with LangGraph | Hybrid RAG Tool-Calling | Gemini 3.1 Flash Lite'
     '</div>', 
     unsafe_allow_html=True
 )
+
+with st.expander("How does this work?"):
+    st.markdown(
+        "1. **Pick or paste code** in the *Code Review & Diff View* tab -- either your own snippet, "
+        "or one of the pre-built benchmark cases in the sidebar (each demonstrates a specific bug class).\n"
+        "2. **(Optional) attach context files** in the sidebar -- e.g. a `utils.py` your snippet calls into -- "
+        "so the agent has more than the snippet alone to search.\n"
+        "3. **Choose audit gates** in the sidebar to tell the agent which lenses to review through "
+        "(security, style, or both).\n"
+        "4. **Run the review** -- a LangGraph agent backed by Gemini reviews the code, and can call a "
+        "`search_codebase` tool (Hybrid BM25 + dense-embedding retrieval) to look up how a helper function "
+        "is defined or used before judging it. Any search it runs is shown in a 🔎 expander under the result.\n"
+        "5. **Compare** the original and refactored code side by side, or switch to the *PyTest Suite Generator* "
+        "tab to get an automated test suite for the same code.\n\n"
+        "Each session is saved under its **Thread ID** (sidebar) in a local SQLite database, so you can return "
+        "to the same conversation later."
+    )
 
 # 5. Multi-Tab Navigation (4 Dedicated Tabs)
 tab_review, tab_tests, tab_journey, tab_capabilities = st.tabs([
@@ -182,6 +264,33 @@ def extract_python_code(markdown_text: str) -> str:
         return matches[0].strip()
     return ""
 
+
+def build_context_files(primary_code: str, primary_label: str = "review_snippet.py") -> dict:
+    """Assembles the {filename: source} dict passed to run_agent_query's
+    search_codebase tool: the code currently in the box, plus whatever
+    extra .py files the user attached in the sidebar."""
+    files = {}
+    if primary_code and primary_code.strip():
+        files[primary_label] = primary_code
+    for uploaded in context_uploads or []:
+        try:
+            files[uploaded.name] = uploaded.getvalue().decode("utf-8", errors="replace")
+        except Exception:
+            continue
+    return files
+
+
+def render_tool_call_log(tool_calls: list) -> None:
+    """Shows what the agent actually searched for, so RAG tool use is
+    visible instead of happening silently."""
+    if not tool_calls:
+        st.caption("No codebase search was needed for this answer.")
+        return
+    with st.expander(f"🔎 Agent searched the codebase {len(tool_calls)} time(s)", expanded=False):
+        for call in tool_calls:
+            query = call.get("args", {}).get("query", "")
+            st.markdown(f"- `{call.get('name', 'tool')}(query=\"{query}\")`")
+
 # ==============================================================================
 # TAB 1: CODE REVIEW & DIFF VIEW
 # ==============================================================================
@@ -192,16 +301,25 @@ with tab_review:
         st.subheader("Source Code & Scope")
         
         default_objective = "Evaluate security vulnerabilities, PEP 8 compliance, performance, and architecture."
-        user_task = st.text_input("Review Scope:", value=default_objective)
-        
-        initial_code = sample_codes.get(preset_choice, "") if preset_choice != "Custom Code" else ""
-        
+        user_task = st.text_input(
+            "Review Scope:",
+            value=default_objective,
+            help="Tells the agent what to focus on. Edit this if you want a narrower review, e.g. 'Only check for security issues.'"
+        )
+
+        # "review_code_input" is populated either by _load_benchmark_case()
+        # (when a preset is picked) or by the user typing directly into the
+        # box below -- Streamlit tracks both through the same session_state
+        # key, so we only need to seed it once on the very first run.
+        if "review_code_input" not in st.session_state:
+            st.session_state["review_code_input"] = ""
+
         user_code = st.text_area(
             "Paste Python Snippet:",
-            value=initial_code,
             height=340,
             placeholder="def target_routine():\n    pass",
-            key="review_code_input"
+            key="review_code_input",
+            help="Write or paste code here, or pick a benchmark case from the sidebar to auto-fill this box."
         )
         
         submit_button = st.button("Execute Code Review", type="primary", use_container_width=True)
@@ -213,7 +331,7 @@ with tab_review:
             if not user_code.strip():
                 st.warning("Please provide a valid code snippet before initiating analysis.")
             else:
-                with st.spinner("Executing AST inspection, OWASP security scanning, and architectural evaluation..."):
+                with st.spinner("Agent is reviewing the code (and may search attached context files if relevant)..."):
                     audit_directives = []
                     if enable_owasp:
                         audit_directives.append("- Conduct an OWASP Top 10 security audit (SQL injection, hardcoded secrets, input sanitization).")
@@ -222,9 +340,17 @@ with tab_review:
                     
                     directives_text = "\n".join(audit_directives)
 
+                    context_note = ""
+                    if context_uploads:
+                        attached_names = ", ".join(f.name for f in context_uploads)
+                        context_note = (
+                            f"\nAttached context files (searchable via search_codebase): {attached_names}\n"
+                        )
+
                     formatted_prompt = (
                         f"Review Objective: {user_task}\n\n"
-                        f"Target Code:\n```python\n{user_code}\n```\n\n"
+                        f"Target Code:\n```python\n{user_code}\n```\n"
+                        f"{context_note}\n"
                         f"Special Audit Directives:\n{directives_text}\n\n"
                         f"Instructions:\n"
                         f"Provide a comprehensive, senior software engineer review in clean Markdown.\n"
@@ -237,21 +363,26 @@ with tab_review:
                         f"### 6. Summary of Key Improvements"
                     )
 
+                    context_files = build_context_files(user_code)
+
                     event_loop = asyncio.new_event_loop()
                     asyncio.set_event_loop(event_loop)
                     try:
-                        evaluation_response = event_loop.run_until_complete(
-                            run_agent_query(formatted_prompt, session_id=session_id)
+                        evaluation_response, tool_calls_used = event_loop.run_until_complete(
+                            run_agent_query(formatted_prompt, session_id=session_id, context_files=context_files)
                         )
                         st.session_state["last_review"] = evaluation_response
+                        st.session_state["last_review_tool_calls"] = tool_calls_used
                         st.session_state["original_code"] = user_code
                         st.markdown(evaluation_response)
+                        render_tool_call_log(tool_calls_used)
                     except Exception as error:
                         st.error(f"Execution Error: {str(error)}")
                     finally:
                         event_loop.close()
         elif "last_review" in st.session_state:
             st.markdown(st.session_state["last_review"])
+            render_tool_call_log(st.session_state.get("last_review_tool_calls", []))
         else:
             st.info("Input a code snippet on the left panel and click 'Execute Code Review' to inspect the report.")
 
@@ -321,13 +452,16 @@ with tab_tests:
                         f"Wrap the full runnable test code inside a single ```python ``` block with clear explanatory comments."
                     )
                     
+                    context_files = build_context_files(test_target_code, primary_label="test_target.py")
+
                     event_loop = asyncio.new_event_loop()
                     asyncio.set_event_loop(event_loop)
                     try:
-                        test_response = event_loop.run_until_complete(
-                            run_agent_query(test_prompt, session_id=f"{session_id}_tests")
+                        test_response, test_tool_calls = event_loop.run_until_complete(
+                            run_agent_query(test_prompt, session_id=f"{session_id}_tests", context_files=context_files)
                         )
                         st.markdown(test_response)
+                        render_tool_call_log(test_tool_calls)
                     except Exception as error:
                         st.error(f"Execution Error: {str(error)}")
                     finally:
@@ -378,7 +512,8 @@ with tab_journey:
         st.markdown(
             '<div class="metric-desc">'
             'Combined lexical and vector outputs using Reciprocal Rank Fusion (RRF). '
-            'Applied <code>cross-encoder/ms-marco-MiniLM-L-6-v2</code> to eliminate retrieval noise.'
+            'Applied <code>cross-encoder/ms-marco-MiniLM-L-6-v2</code> to eliminate retrieval noise. '
+            '<strong>This engine powers the live search_codebase tool</strong> in the Code Review tab.'
             '</div>', 
             unsafe_allow_html=True
         )
@@ -404,8 +539,10 @@ with tab_journey:
         st.markdown('<div class="metric-title">Model Context Protocol (MCP)</div>', unsafe_allow_html=True)
         st.markdown(
             '<div class="metric-desc">'
-            'Wrapped the hybrid search pipeline into an MCP stdio server. '
-            'Exposed the local codebase search tool over standardized JSON-RPC protocols.'
+            'Wrapped the hybrid search pipeline into an MCP stdio server, exposed over standardized '
+            'JSON-RPC. Runs as a standalone client/server pair (e.g. for Claude Desktop or Cursor) -- '
+            'this hosted app calls the same underlying engine in-process rather than over MCP, since '
+            'spawning a stdio subprocess is not a good fit for a cloud deployment.'
             '</div>', 
             unsafe_allow_html=True
         )

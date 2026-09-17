@@ -93,8 +93,17 @@ def simple_tokenize(text: str) -> list[str]:
 
 
 class HybridIndex:
-    def __init__(self, embedding_model_name: str = EMBEDDING_MODEL):
-        self.embedder = SentenceTransformer(embedding_model_name)
+    def __init__(
+        self,
+        embedding_model_name: str = EMBEDDING_MODEL,
+        embedder: SentenceTransformer | None = None,
+    ):
+        # Accepting an already-loaded embedder is what lets a caller that
+        # builds many short-lived indexes (e.g. one per incoming request)
+        # reuse a single set of model weights instead of paying the load
+        # cost -- reading the weights off disk and moving them onto a
+        # device -- on every call. Passing nothing keeps the old behavior.
+        self.embedder = embedder if embedder is not None else SentenceTransformer(embedding_model_name)
         self.chunks: list[dict] = []
         self.bm25: BM25Okapi | None = None
         self.embeddings: np.ndarray | None = None
@@ -140,8 +149,8 @@ def reciprocal_rank_fusion(rankings: list[list[int]], k: int = 60) -> list[tuple
 
 
 class Reranker:
-    def __init__(self, model_name: str = RERANKER_MODEL):
-        self.model = CrossEncoder(model_name)
+    def __init__(self, model_name: str = RERANKER_MODEL, model: CrossEncoder | None = None):
+        self.model = model if model is not None else CrossEncoder(model_name)
 
     def rerank(self, query: str, candidates: list[dict], top_k: int) -> list[tuple[dict, float]]:
         pairs = [(query, c["text"]) for c in candidates]
