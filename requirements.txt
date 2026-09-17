@@ -13,3 +13,4 @@ aiosqlite
 streamlit
 numpy
 pyarrow<17.0.0
+datasets==2.19.2
